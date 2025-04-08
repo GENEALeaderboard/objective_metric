@@ -1,10 +1,11 @@
 import glob
 import os
+import random
 
 import numpy as np
 from scipy import linalg
 import torch
-from emage_evaltools.metric import FGD, BC, L1div
+from emage_evaltools.mertic import FGD, BC, L1div  # mertic is typo, but we keep it for compatibility
 import emage_utils.rotation_conversions as rc
 from emage_utils.motion_io import beat_format_load
 from emage_utils.motion_rep_transfer import get_motion_rep_numpy
@@ -52,7 +53,7 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
 
         l1_evaluator.compute(motion_position_pred)
 
-        # fgd requires rotation 6d representaiton
+        # fgd requires rotation 6d representation
         motion_gt = torch.from_numpy(motion_gt).to(device).unsqueeze(0)
         motion_pred = torch.from_numpy(motion_pred).to(device).unsqueeze(0)
         motion_gt = rc.axis_angle_to_rotation_6d(motion_gt.reshape(1, t, 55, 3)).reshape(1, t, 55 * 6)
@@ -66,20 +67,51 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
     return metrics
 
 
-def make_list(npz_path, audio_basepath='./BEAT2/beat_english_v2.0.0/wave16k/'):
+def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/',
+              sample_strategy='fixed', is_generated=False):
     out_list = []
-    npz_files = glob.glob(os.path.join(npz_path, "*.npz"))
-    for npz_file in npz_files:
-        video_id = os.path.splitext(os.path.basename(npz_file))[0].replace('_output', '')
-        motion_path = npz_file
-        audio_path = os.path.join(audio_basepath, video_id + '.wav')
+    all_npz_files = glob.glob(os.path.join(npz_path, "*.npz"))
 
-        out_list.append({
-            "video_id": video_id,
-            "motion_path": motion_path,
-            "audio_path": audio_path,
-            "mode": "test"
-        })
+    if is_generated:
+        prefix_map = {}
+        for file in all_npz_files:
+            basename = os.path.splitext(os.path.basename(file))[0]
+            parts = basename.split("_")
+            if len(parts) < 6:
+                print(f"Skipping malformed filename: {basename}")
+                continue
+            prefix = "_".join(parts[:5])  # everything before 5th underscore
+            prefix_map.setdefault(prefix, []).append(file)
+
+        for prefix, files in prefix_map.items():
+            video_id = prefix
+            audio_path = os.path.join(audio_basepath, video_id + ".wav")
+
+            if sample_strategy == 'fixed':
+                selected_file = sorted(files)[0]  # first sample
+            elif sample_strategy == 'random':
+                selected_file = random.choice(files)
+            else:
+                raise ValueError("sample_strategy must be 'fixed' or 'random'")
+
+            out_list.append({
+                "video_id": video_id,
+                "motion_path": selected_file,
+                "audio_path": audio_path,
+                "mode": "test"
+            })
+    else:
+        for file in all_npz_files:
+            basename = os.path.splitext(os.path.basename(file))[0]
+            video_id = basename
+            audio_path = os.path.join(audio_basepath, video_id + ".wav")
+
+            out_list.append({
+                "video_id": video_id,
+                "motion_path": file,
+                "audio_path": audio_path,
+                "mode": "test"
+            })
 
     return out_list
 
@@ -119,6 +151,7 @@ def calculate_activation_statistics(
     mu = np.mean(activations, axis=0)
     cov = np.cov(activations, rowvar=False)
     return mu, cov
+
 
 def calculate_frechet_distance(
     mu1: np.ndarray,
@@ -163,6 +196,7 @@ def calculate_frechet_distance(
     tr_covmean = np.trace(covmean)
 
     return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean
+
 
 def evaluation_a2p(joint_mask, gt_list, pred_list):
     # this function is modified from https://github.com/facebookresearch/audio2photoreal
@@ -241,7 +275,7 @@ if __name__ == '__main__':
 
     # get npz lists
     gt_list = make_list('./examples/motion_human')
-    pred_list = make_list('./examples/motion_generated')
+    pred_list = make_list('./examples/motion_generated', is_generated=True, sample_strategy='fixed')
     if not compare_video_ids(gt_list, pred_list):
         exit()
 
