@@ -282,14 +282,14 @@ if __name__ == '__main__':
 
     gt_list = make_list("./examples/BEAT2/")
     all_system_dir = "./examples/motion_generated/"
-    for system in os.listdir(all_system_dir):
+    for system in sorted(os.listdir(all_system_dir)):
         if not isdir(join(all_system_dir, system)): 
             continue
 
         pred_list = make_list(join(all_system_dir, system), is_generated=True, sample_strategy='fixed')
         if not compare_video_ids(gt_list, pred_list):
             exit()
-
+        print(system, end=" ")
         # evaluation for fgd, bc, div
         metrics_emage = evaluation_emage([True] * 55, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1div_evaluator, device)
 
