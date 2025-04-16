@@ -2,6 +2,8 @@ import glob
 import os
 import random
 
+from os.path import isdir, join
+
 import numpy as np
 from scipy import linalg
 import torch
@@ -12,6 +14,9 @@ from emage_utils.motion_rep_transfer import get_motion_rep_numpy
 from tqdm import tqdm
 
 device = torch.device("cuda")
+
+def to_latex(system, metrics):
+    return f"{system} & {round(metrics['fgd'], 3)} & {round(metrics['fid_k'], 3)} & {round(metrics['var_k'], 3)} & {round(metrics['fid_g'], 3)} & {round(metrics['div'], 3)} & {round(metrics['bc'], 3)} \\\\\n"
 
 def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1_evaluator, device):
     fgd_evaluator.reset()
@@ -273,17 +278,30 @@ if __name__ == '__main__':
     bc_evaluator = BC(download_path="./emage_evaltools/", sigma=0.3, order=7)
     l1div_evaluator = L1div()
 
-    # get npz lists
-    gt_list = make_list('./examples/motion_human')
-    pred_list = make_list('./examples/motion_generated', is_generated=True, sample_strategy='fixed')
-    if not compare_video_ids(gt_list, pred_list):
-        exit()
+    latex_output = """System & FGD & $\\text{FGD}_\\text{k}$ & $\\text{var}_\\text{k}$ & $\\text{FGD}_\\text{g}$ & $\\text{L}_1\\text{-div}$ & BC \\\\\n\\\\\n\\midrule\n"""
 
-    # evaluation for fgd, bc, div
-    metrics_emage = evaluation_emage([True] * 55, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1div_evaluator, device)
+    gt_list = make_list("./examples/BEAT2/")
+    all_system_dir = "./examples/motion_generated/"
+    for system in os.listdir(all_system_dir):
+        if not isdir(join(all_system_dir, system)): 
+            continue
 
-    # evaluation for var_k, fid_g, fid_k
-    metrics_a2p = evaluation_a2p([True] * 55, gt_list, pred_list)
+        pred_list = make_list(join(all_system_dir, system), is_generated=True, sample_strategy='fixed')
+        if not compare_video_ids(gt_list, pred_list):
+            exit()
 
-    metrics = {**metrics_emage, **metrics_a2p}
-    print(metrics)
+        # evaluation for fgd, bc, div
+        metrics_emage = evaluation_emage([True] * 55, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1div_evaluator, device)
+
+        # evaluation for var_k, fid_g, fid_k
+        metrics_a2p = evaluation_a2p([True] * 55, gt_list, pred_list)
+
+        metrics = {**metrics_emage, **metrics_a2p}
+        print(metrics)
+        
+        latex_output += to_latex(system, metrics)
+        fgd_evaluator.reset()
+        bc_evaluator.reset()
+        l1div_evaluator.reset()
+
+    print(latex_output)
