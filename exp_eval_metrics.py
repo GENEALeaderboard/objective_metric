@@ -7,7 +7,7 @@ from os.path import isdir, join
 import numpy as np
 from scipy import linalg
 import torch
-from emage_evaltools.mertic import FGD, BC, L1div  # mertic is typo, but we keep it for compatibility
+from emage_evaltools.metric_modified import FGD, BC, L1div
 import emage_utils.rotation_conversions as rc
 from emage_utils.motion_io import beat_format_load
 from emage_utils.motion_rep_transfer import get_motion_rep_numpy
@@ -15,8 +15,19 @@ from tqdm import tqdm
 
 device = torch.device("cuda")
 
-def to_latex(system, metrics):
-    return f"{system} & {round(metrics['fgd'], 3)} & {round(metrics['fid_k'], 3)} & {round(metrics['var_k'], 3)} & {round(metrics['fid_g'], 3)} & {round(metrics['div'], 3)} & {round(metrics['bc'], 3)} \\\\\n"
+def to_latex(system, metrics, default='-'):
+    def safe_round(value):
+        return round(value, 3) if isinstance(value, (int, float)) else default
+
+    return (f"{system} & {safe_round(metrics.get('fgd', default))} & "
+            f"{safe_round(metrics.get('fid_k', default))} & "
+            f"{safe_round(metrics.get('fid_g', default))} & "
+            f"{safe_round(metrics.get('div', default))} & "
+            f"{safe_round(metrics.get('bc_a2m', default))} & "
+            f"{safe_round(metrics.get('bc_m2a', default))} & "
+            f"{safe_round(metrics.get('var_k', default))} & "
+            f"{safe_round(metrics.get('sample_div', default))} \\\\\n")
+
 
 def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1_evaluator, device):
     fgd_evaluator.reset()
@@ -36,6 +47,16 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
         motion_gt = gt_dict["poses"]
         motion_pred = pred_dict["poses"]
         # motion_pred = gt_dict["poses"] + np.random.normal(0, 1, motion_gt.shape)  # only for metric validation
+
+        # check if motion_gt and motion_pred have the same shape
+        if motion_gt.shape[1:] != motion_pred.shape[1:]:
+            print(f"Shape mismatch for {test_file['video_id']}: {motion_gt.shape} vs {motion_pred.shape}")
+            assert False
+
+        # check if motion_gt and motion_pred have similar number of frames
+        if abs(motion_gt.shape[0] - motion_pred.shape[0]) > motion_gt.shape[0] * 0.15:
+            print(f"Frame count mismatch for {test_file['video_id']}: {motion_gt.shape[0]} vs {motion_pred.shape[0]}")
+            assert False
 
         betas = gt_dict["betas"]
 
@@ -67,7 +88,9 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
 
     metrics = {}
     metrics["fgd"] = fgd_evaluator.compute()
-    metrics["bc"] = bc_evaluator.avg()
+    bc_ret = bc_evaluator.avg()
+    metrics["bc_a2m"] = bc_ret['a2m']
+    metrics["bc_m2a"] = bc_ret['m2a']
     metrics["div"] = l1_evaluator.avg()
     return metrics
 
@@ -82,7 +105,7 @@ def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/',
         for file in all_npz_files:
             basename = os.path.splitext(os.path.basename(file))[0]
             parts = basename.split("_")
-            if len(parts) < 6:
+            if len(parts) < 5:
                 print(f"Skipping malformed filename: {basename}")
                 continue
             prefix = "_".join(parts[:5])  # everything before 5th underscore
@@ -272,21 +295,80 @@ def evaluation_a2p(joint_mask, gt_list, pred_list):
     return metrics
 
 
+def evaluation_sample_div(system_path):
+    """
+    Computes sample diversity across multiple generated samples (e.g., _sample_1, _sample_2)
+    """
+    sample_map = {}
+    all_npz_files = glob.glob(os.path.join(system_path, "*.npz"))
+
+    # Group samples by video_id prefix
+    for file in all_npz_files:
+        basename = os.path.splitext(os.path.basename(file))[0]
+        parts = basename.split("_")
+        if len(parts) < 6:
+            continue
+        prefix = "_".join(parts[:5])  # Use first 5 parts as video_id
+        sample_map.setdefault(prefix, []).append(file)
+
+    diversity_vals = []
+
+    # For each video_id with multiple samples
+    for video_id, sample_paths in sample_map.items():
+        if len(sample_paths) < 2:
+            print(f"Only one sample for {video_id}, Aborting.")
+            return None
+
+        pose_list = []
+        min_len = float('inf')
+
+        # Load all poses and find the shortest length
+        for path in sample_paths:
+            data = beat_format_load(path, [True] * 55)
+            poses = data["poses"]  # shape: (T, 55, 3)
+            min_len = min(min_len, poses.shape[0])
+            pose_list.append(poses)
+
+        # Trim all samples to the same length
+        pose_list = [p[:min_len] for p in pose_list]
+
+        # Stack and flatten: (num_samples, T, 55, 3) -> (num_samples, T * 55 * 3)
+        pose_array = np.stack(pose_list, axis=0)
+        num_samples = pose_array.shape[0]
+        flattened = pose_array.reshape(num_samples, -1)
+
+        # Compute variance across samples (axis=0) and average
+        cross_sample_var = np.var(flattened, axis=0)
+        diversity_vals.append(cross_sample_var.mean())
+
+    # Final diversity score
+    if len(diversity_vals) == 0:
+        print("No video_id with multiple samples found.")
+        return None
+
+    overall_div = float(np.mean(diversity_vals))
+    # print("Sample diversity (raw pose):", overall_div)
+    return {"sample_div": overall_div}
+
+
 if __name__ == '__main__':
     # init
     fgd_evaluator = FGD(download_path="./emage_evaltools/")
     bc_evaluator = BC(download_path="./emage_evaltools/", sigma=0.3, order=7)
     l1div_evaluator = L1div()
 
-    latex_output = """System & FGD & $\\text{FGD}_\\text{k}$ & $\\text{var}_\\text{k}$ & $\\text{FGD}_\\text{g}$ & $\\text{L}_1\\text{-div}$ & BC \\\\\n\\\\\n\\midrule\n"""
+    latex_output = ("System & FGD & $\\text{FD}_\\text{k}$ & $\\text{FD}_\\text{g}$ & $\\text{L}_1\\text{-div}$ & "
+                    "$\\text{BC}_\\text{a2m}$ & $\\text{BC}_\\text{m2a}$ & $\\text{var}_\\text{k}$ & "
+                    "Sample div \\\\\n\\\\\n\\midrule\n")
 
     gt_list = make_list("./examples/BEAT2/")
     all_system_dir = "./examples/motion_generated/"
     for system in sorted(os.listdir(all_system_dir)):
-        if not isdir(join(all_system_dir, system)): 
+        system_path = join(all_system_dir, system)
+        if not isdir(system_path):
             continue
 
-        pred_list = make_list(join(all_system_dir, system), is_generated=True, sample_strategy='fixed')
+        pred_list = make_list(system_path, is_generated=True, sample_strategy='fixed')
         if not compare_video_ids(gt_list, pred_list):
             exit()
         print(system, end=" ")
@@ -296,9 +378,12 @@ if __name__ == '__main__':
         # evaluation for var_k, fid_g, fid_k
         metrics_a2p = evaluation_a2p([True] * 55, gt_list, pred_list)
 
-        metrics = {**metrics_emage, **metrics_a2p}
+        # evaluation for sample diversity
+        metric_sample_div = evaluation_sample_div(system_path)
+
+        metrics = {**metrics_emage, **metrics_a2p, **(metric_sample_div if metric_sample_div else {})}
         print(metrics)
-        
+
         latex_output += to_latex(system, metrics)
         fgd_evaluator.reset()
         bc_evaluator.reset()
