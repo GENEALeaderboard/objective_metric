@@ -13,20 +13,9 @@ from emage_utils.motion_io import beat_format_load
 from emage_utils.motion_rep_transfer import get_motion_rep_numpy
 from tqdm import tqdm
 
+from latex_table_builder import LatexTableBuilder
+
 device = torch.device("cuda")
-
-def to_latex(system, metrics, default='-'):
-    def safe_round(value):
-        return round(value, 3) if isinstance(value, (int, float)) else default
-
-    return (f"{system} & {safe_round(metrics.get('fgd', default))} & "
-            f"{safe_round(metrics.get('fid_k', default))} & "
-            f"{safe_round(metrics.get('fid_g', default))} & "
-            f"{safe_round(metrics.get('div', default))} & "
-            f"{safe_round(metrics.get('bc_a2m', default))} & "
-            f"{safe_round(metrics.get('bc_m2a', default))} & "
-            f"{safe_round(metrics.get('var_k', default))} & "
-            f"{safe_round(metrics.get('sample_div', default))} \\\\\n")
 
 
 def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1_evaluator, device):
@@ -343,7 +332,7 @@ def evaluation_sample_div(system_path):
 
     # Final diversity score
     if len(diversity_vals) == 0:
-        print("No video_id with multiple samples found.")
+        print("Warning: evaluation_sample_div fn. no video_id with multiple samples found.")
         return None
 
     overall_div = float(np.mean(diversity_vals))
@@ -351,15 +340,24 @@ def evaluation_sample_div(system_path):
     return {"sample_div": overall_div}
 
 
+LATEX_COLUMNS = [
+    ("FGD", "fgd"),
+    ("$\\text{FD}_\\text{k}$", "fid_k"),
+    ("$\\text{FD}_\\text{g}$", "fid_g"),
+    ("$\\text{L}_1\\text{-div}$", "div"),
+    ("$\\text{BC}_\\text{a2m}$", "bc_a2m"),
+    ("$\\text{BC}_\\text{m2a}$", "bc_m2a"),
+    ("$\\text{var}_\\text{k}$", "var_k"),
+    ("Sample div", "sample_div"),
+]  # (header text, key)
+
+
 if __name__ == '__main__':
     # init
     fgd_evaluator = FGD(download_path="./emage_evaltools/")
     bc_evaluator = BC(download_path="./emage_evaltools/", sigma=0.3, order=7)
     l1div_evaluator = L1div()
-
-    latex_output = ("System & FGD & $\\text{FD}_\\text{k}$ & $\\text{FD}_\\text{g}$ & $\\text{L}_1\\text{-div}$ & "
-                    "$\\text{BC}_\\text{a2m}$ & $\\text{BC}_\\text{m2a}$ & $\\text{var}_\\text{k}$ & "
-                    "Sample div \\\\\n\\\\\n\\midrule\n")
+    table = LatexTableBuilder(columns=LATEX_COLUMNS)
 
     gt_list = make_list("./examples/BEAT2/")
     all_system_dir = "./examples/motion_generated/"
@@ -375,7 +373,7 @@ if __name__ == '__main__':
         # evaluation for fgd, bc, div
         metrics_emage = evaluation_emage([True] * 55, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1div_evaluator, device)
 
-        # evaluation for var_k, fid_g, fid_k
+        # evaluation for var_k, fd_g, fd_k
         metrics_a2p = evaluation_a2p([True] * 55, gt_list, pred_list)
 
         # evaluation for sample diversity
@@ -384,9 +382,9 @@ if __name__ == '__main__':
         metrics = {**metrics_emage, **metrics_a2p, **(metric_sample_div if metric_sample_div else {})}
         print(metrics)
 
-        latex_output += to_latex(system, metrics)
+        table.add_row(system, metrics)
         fgd_evaluator.reset()
         bc_evaluator.reset()
         l1div_evaluator.reset()
 
-    print(latex_output)
+    print(table.render())
