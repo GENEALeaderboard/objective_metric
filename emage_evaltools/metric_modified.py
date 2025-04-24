@@ -34,20 +34,40 @@ class L1div(object):
 
 
 class SRGR(object):
-    def __init__(self, threshold=0.1, joints=47, joint_dim=3):
+    def __init__(self, threshold=0.1, joints=55, joint_dim=3, fps=30):
         self.threshold = threshold
         self.pose_dimes = joints
         self.joint_dim = joint_dim
+        self.fps = fps
         self.counter = 0
         self.sum = 0
 
-    def run(self, results, targets, semantic=None, verbose=False):
-        if semantic is None:
+    def parse_semantic(self, tsv_data, n):
+        fps = self.fps
+
+        col_map = {}
+        for key in ("start", "end", "weight"):
+            col_map[key] = tsv_data[key].astype(float).values
+        starts, ends, weights = (col_map["start"], col_map["end"], col_map["weight"])
+
+        semantic = np.zeros(n, dtype=np.float32)
+
+        for s, e, w in zip(starts, ends, weights):
+            if e <= s:
+                continue
+            s_f = int(np.floor(s * fps))
+            e_f = int(np.ceil(e * fps))
+            semantic[s_f:e_f] = np.maximum(semantic[s_f:e_f], w)
+
+        return semantic
+
+    def run(self, results, targets, semantic_raw_data=None, verbose=False):
+        if semantic_raw_data is None:
             semantic = np.ones(results.shape[0])
             avg_weight = 1.0
         else:
-            # srgr == 0.165 when all success, scale range to [0, 1]
-            avg_weight = 0.165
+            semantic = self.parse_semantic(semantic_raw_data, targets.shape[0])
+            avg_weight = 0.165  # srgr == 0.165 when all success, scale range to [0, 1]
         results = results.reshape(-1, self.pose_dimes, self.joint_dim)
         targets = targets.reshape(-1, self.pose_dimes, self.joint_dim)
         semantic = semantic.reshape(-1)

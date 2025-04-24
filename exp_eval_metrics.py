@@ -5,9 +5,10 @@ import random
 from os.path import isdir, join
 
 import numpy as np
+import pandas as pd
 from scipy import linalg
 import torch
-from emage_evaltools.metric_modified import FGD, BC, L1div
+from emage_evaltools.metric_modified import FGD, BC, L1div, SRGR
 import emage_utils.rotation_conversions as rc
 from emage_utils.motion_io import beat_format_load
 from emage_utils.motion_rep_transfer import get_motion_rep_numpy
@@ -18,10 +19,11 @@ from latex_table_builder import LatexTableBuilder
 device = torch.device("cuda")
 
 
-def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1_evaluator, device):
+def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1_evaluator, srgr_evaluator, device):
     fgd_evaluator.reset()
     bc_evaluator.reset()
     l1_evaluator.reset()
+    srgr_evaluator = SRGR()
 
     for test_file in tqdm(gt_list, desc="Evaluation"):
         # only load selective joints
@@ -56,6 +58,9 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
         # bc and l1 require position representation
         motion_position_pred = get_motion_rep_numpy(motion_pred, device=device, betas=betas)["position"]  # t*55*3
         motion_position_pred = motion_position_pred.reshape(t, -1)
+        motion_position_gt = get_motion_rep_numpy(motion_gt, device=device, betas=betas)["position"]  # t*55*3
+        motion_position_gt = motion_position_gt.reshape(t, -1)
+
         # ignore the start and end 2s, this may for beat dataset only
         audio_beat = bc_evaluator.load_audio(test_file["audio_path"], t_start=2 * 16000,
                                              t_end=int((t - 60) / 30 * 16000))
@@ -75,16 +80,22 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
         motion_pred = rc.axis_angle_to_rotation_6d(motion_pred.reshape(1, t, 55, 3)).reshape(1, t, 55 * 6)
         fgd_evaluator.update(motion_pred.float(), motion_gt.float())
 
+        # srgr
+        df = pd.read_csv(test_file['sem_path'], sep='\t', header=None,
+                         names=['label', 'start', 'end', 'duration', 'weight', 'comment'])
+        srgr_evaluator.run(motion_position_pred, motion_position_gt, df)
+
     metrics = {}
     metrics["fgd"] = fgd_evaluator.compute()
     bc_ret = bc_evaluator.avg()
     metrics["bc_a2m"] = bc_ret['a2m']
     metrics["bc_m2a"] = bc_ret['m2a']
     metrics["div"] = l1_evaluator.avg()
+    metrics["srgr"] = srgr_evaluator.avg()
     return metrics
 
 
-def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/',
+def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/', sem_basepath='./BEAT2_english_sem/',
               sample_strategy='fixed', is_generated=False):
     out_list = []
     all_npz_files = glob.glob(os.path.join(npz_path, "*.npz"))
@@ -115,6 +126,7 @@ def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/',
                 "video_id": video_id,
                 "motion_path": selected_file,
                 "audio_path": audio_path,
+                "sem_path": os.path.join(sem_basepath, video_id + ".txt"),
                 "mode": "test"
             })
     else:
@@ -127,6 +139,7 @@ def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/',
                 "video_id": video_id,
                 "motion_path": file,
                 "audio_path": audio_path,
+                "sem_path": os.path.join(sem_basepath, video_id + ".txt"),
                 "mode": "test"
             })
 
@@ -349,6 +362,7 @@ LATEX_COLUMNS = [
     ("$\\text{BC}_\\text{m2a}$", "bc_m2a"),
     ("$\\text{var}_\\text{k}$", "var_k"),
     ("Sample div", "sample_div"),
+    ("SRGR", "srgr"),
 ]  # (header text, key)
 
 
@@ -357,6 +371,7 @@ if __name__ == '__main__':
     fgd_evaluator = FGD(download_path="./emage_evaltools/")
     bc_evaluator = BC(download_path="./emage_evaltools/", sigma=0.3, order=7)
     l1div_evaluator = L1div()
+    srgr_evaluator = SRGR()
     table = LatexTableBuilder(columns=LATEX_COLUMNS)
 
     gt_list = make_list("./examples/BEAT2/")
@@ -371,7 +386,8 @@ if __name__ == '__main__':
             exit()
         print(system, end=" ")
         # evaluation for fgd, bc, div
-        metrics_emage = evaluation_emage([True] * 55, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1div_evaluator, device)
+        metrics_emage = evaluation_emage([True] * 55, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1div_evaluator,
+                                         srgr_evaluator, device)
 
         # evaluation for var_k, fd_g, fd_k
         metrics_a2p = evaluation_a2p([True] * 55, gt_list, pred_list)
