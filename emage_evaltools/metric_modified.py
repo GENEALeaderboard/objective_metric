@@ -324,6 +324,12 @@ class FGD(object):
         self.pred_features.append(self.get_feature(pred))
         self.target_features.append(self.get_feature(target))
 
+    def update_pred(self, pred):
+        self.pred_features.append(self.get_feature(pred))
+
+    def update_target(self, target):
+        self.target_features.append(self.get_feature(target))
+
     def compute(self):
         pred_features = np.concatenate([x.reshape(-1, x.shape[-1]) for x in self.pred_features], axis=0)
         target_features = np.concatenate([x.reshape(-1, x.shape[-1]) for x in self.target_features], axis=0)
