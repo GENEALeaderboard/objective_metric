@@ -19,11 +19,23 @@ from latex_table_builder import LatexTableBuilder
 device = torch.device("cuda")
 
 
-def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1_evaluator, srgr_evaluator, device):
+def choose_item(path_list, strategy):
+    if strategy == 'random':
+        return [random.choice(path_list)]
+    elif strategy == 'fixed':
+        return [path_list[0]]
+    elif strategy == 'all':
+        return path_list
+    else:
+        raise ValueError("Invalid sampling strategy. Use 'random' or 'fixed'.")
+
+
+def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1_evaluator, srgr_evaluator, device,
+                     sampling_strategy='fixed'):
     fgd_evaluator.reset()
     bc_evaluator.reset()
     l1_evaluator.reset()
-    srgr_evaluator = SRGR()
+    srgr_evaluator.reset()
 
     for test_file in tqdm(gt_list, desc="Evaluation"):
         # only load selective joints
@@ -31,59 +43,62 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
         if not pred_file:
             print(f"Missing prediction for {test_file['video_id']}")
             continue
-        # print(test_file["motion_path"], pred_file["motion_path"])
-        gt_dict = beat_format_load(test_file["motion_path"], joint_mask)
-        pred_dict = beat_format_load(pred_file["motion_path"], joint_mask)
-
+        gt_dict = beat_format_load(test_file["motion_path_list"][0], joint_mask)
         motion_gt = gt_dict["poses"]
-        motion_pred = pred_dict["poses"]
-        # motion_pred = gt_dict["poses"] + np.random.normal(0, 1, motion_gt.shape)  # only for metric validation
-
-        # check if motion_gt and motion_pred have the same shape
-        if motion_gt.shape[1:] != motion_pred.shape[1:]:
-            print(f"Shape mismatch for {test_file['video_id']}: {motion_gt.shape} vs {motion_pred.shape}")
-            assert False
-
-        # check if motion_gt and motion_pred have similar number of frames
-        if abs(motion_gt.shape[0] - motion_pred.shape[0]) > motion_gt.shape[0] * 0.15:
-            print(f"Frame count mismatch for {test_file['video_id']}: {motion_gt.shape[0]} vs {motion_pred.shape[0]}")
-            assert False
-
         betas = gt_dict["betas"]
 
-        t = min(motion_gt.shape[0], motion_pred.shape[0])
-        motion_gt = motion_gt[:t]
-        motion_pred = motion_pred[:t]
+        pred_files = choose_item(pred_file["motion_path_list"], sampling_strategy)
 
-        # bc and l1 require position representation
-        motion_position_pred = get_motion_rep_numpy(motion_pred, device=device, betas=betas)["position"]  # t*55*3
-        motion_position_pred = motion_position_pred.reshape(t, -1)
-        motion_position_gt = get_motion_rep_numpy(motion_gt, device=device, betas=betas)["position"]  # t*55*3
-        motion_position_gt = motion_position_gt.reshape(t, -1)
+        for i, f in enumerate(pred_files):
+            pred_dict = beat_format_load(f, joint_mask)
+            motion_pred = pred_dict["poses"]
 
-        # ignore the start and end 2s, this may for beat dataset only
-        audio_beat = bc_evaluator.load_audio(test_file["audio_path"], t_start=2 * 16000,
-                                             t_end=int((t - 60) / 30 * 16000))
-        motion_beat = bc_evaluator.load_motion(motion_position_pred, t_start=60, t_end=t - 60, pose_fps=30,
-                                               without_file=True)
-        bc_evaluator.compute(audio_beat, motion_beat, length=t - 120, pose_fps=30)
-        # audio_beat = bc_evaluator.load_audio(test_file["audio_path"], t_start=0 * 16000, t_end=int((t-0)/30*16000))
-        # motion_beat = bc_evaluator.load_motion(motion_position_pred, t_start=0, t_end=t-0, pose_fps=30, without_file=True)
-        # bc_evaluator.compute(audio_beat, motion_beat, length=t-0, pose_fps=30)
+            # check if motion_gt and motion_pred have the same shape
+            if motion_gt.shape[1:] != motion_pred.shape[1:]:
+                print(f"Shape mismatch for {test_file['video_id']}: {motion_gt.shape} vs {motion_pred.shape}")
+                assert False
 
-        l1_evaluator.compute(motion_position_pred)
+            # check if motion_gt and motion_pred have similar number of frames
+            if abs(motion_gt.shape[0] - motion_pred.shape[0]) > motion_gt.shape[0] * 0.15:
+                print(f"Frame count mismatch for {test_file['video_id']}: {motion_gt.shape[0]} vs {motion_pred.shape[0]}")
+                assert False
 
-        # fgd requires rotation 6d representation
-        motion_gt = torch.from_numpy(motion_gt).to(device).unsqueeze(0)
-        motion_pred = torch.from_numpy(motion_pred).to(device).unsqueeze(0)
-        motion_gt = rc.axis_angle_to_rotation_6d(motion_gt.reshape(1, t, 55, 3)).reshape(1, t, 55 * 6)
-        motion_pred = rc.axis_angle_to_rotation_6d(motion_pred.reshape(1, t, 55, 3)).reshape(1, t, 55 * 6)
-        fgd_evaluator.update(motion_pred.float(), motion_gt.float())
+            t = min(motion_gt.shape[0], motion_pred.shape[0])
+            motion_gt_trunc = motion_gt[:t]
+            motion_pred_trunc = motion_pred[:t]
 
-        # srgr
-        df = pd.read_csv(test_file['sem_path'], sep='\t', header=None,
-                         names=['label', 'start', 'end', 'duration', 'weight', 'comment'])
-        srgr_evaluator.run(motion_position_pred, motion_position_gt, df)
+            # bc and l1 require position representation
+            motion_position_pred = get_motion_rep_numpy(motion_pred_trunc, device=device, betas=betas)["position"]  # t*55*3
+            motion_position_pred = motion_position_pred.reshape(t, -1)
+            motion_position_gt = get_motion_rep_numpy(motion_gt_trunc, device=device, betas=betas)["position"]  # t*55*3
+            motion_position_gt = motion_position_gt.reshape(t, -1)
+
+            # ignore the start and end 2s, this may for beat dataset only
+            audio_beat = bc_evaluator.load_audio(test_file["audio_path"], t_start=2 * 16000,
+                                                 t_end=int((t - 60) / 30 * 16000))
+            motion_beat = bc_evaluator.load_motion(motion_position_pred, t_start=60, t_end=t - 60, pose_fps=30,
+                                                   without_file=True)
+            bc_evaluator.compute(audio_beat, motion_beat, length=t - 120, pose_fps=30)
+            # audio_beat = bc_evaluator.load_audio(test_file["audio_path"], t_start=0 * 16000, t_end=int((t-0)/30*16000))
+            # motion_beat = bc_evaluator.load_motion(motion_position_pred, t_start=0, t_end=t-0, pose_fps=30, without_file=True)
+            # bc_evaluator.compute(audio_beat, motion_beat, length=t-0, pose_fps=30)
+
+            l1_evaluator.compute(motion_position_pred)
+
+            # srgr
+            df = pd.read_csv(test_file['sem_path'], sep='\t', header=None,
+                             names=['label', 'start', 'end', 'duration', 'weight', 'comment'])
+            srgr_evaluator.run(motion_position_pred, motion_position_gt, df)
+
+            # fgd. use all prediction samples
+            motion_pred_trunc = torch.from_numpy(motion_pred_trunc).to(device).unsqueeze(0)
+            motion_pred_trunc = rc.axis_angle_to_rotation_6d(motion_pred_trunc.reshape(1, t, 55, 3)).reshape(1, t, 55 * 6)
+            if i == 0:
+                motion_gt_trunc = torch.from_numpy(motion_gt_trunc).to(device).unsqueeze(0)
+                motion_gt_trunc = rc.axis_angle_to_rotation_6d(motion_gt_trunc.reshape(1, t, 55, 3)).reshape(1, t, 55 * 6)
+                fgd_evaluator.update(motion_gt_trunc.float(), motion_pred_trunc.float())
+            else:
+                fgd_evaluator.update_pred(motion_pred_trunc.float())
 
     metrics = {}
     metrics["fgd"] = fgd_evaluator.compute()
@@ -96,7 +111,7 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
 
 
 def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/', sem_basepath='./BEAT2_english_sem/',
-              sample_strategy='fixed', is_generated=False):
+              is_generated=False):
     out_list = []
     all_npz_files = glob.glob(os.path.join(npz_path, "*.npz"))
 
@@ -115,16 +130,9 @@ def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/', sem_basepath=
             video_id = prefix
             audio_path = os.path.join(audio_basepath, video_id + ".wav")
 
-            if sample_strategy == 'fixed':
-                selected_file = sorted(files)[0]  # first sample
-            elif sample_strategy == 'random':
-                selected_file = random.choice(files)
-            else:
-                raise ValueError("sample_strategy must be 'fixed' or 'random'")
-
             out_list.append({
                 "video_id": video_id,
-                "motion_path": selected_file,
+                "motion_path_list": sorted(files),
                 "audio_path": audio_path,
                 "sem_path": os.path.join(sem_basepath, video_id + ".txt"),
                 "mode": "test"
@@ -137,7 +145,7 @@ def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/', sem_basepath=
 
             out_list.append({
                 "video_id": video_id,
-                "motion_path": file,
+                "motion_path_list": [file],
                 "audio_path": audio_path,
                 "sem_path": os.path.join(sem_basepath, video_id + ".txt"),
                 "mode": "test"
@@ -228,7 +236,7 @@ def calculate_frechet_distance(
     return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean
 
 
-def evaluation_a2p(joint_mask, gt_list, pred_list):
+def evaluation_a2p(joint_mask, gt_list, pred_list, sampling_strategy='fixed'):
     # this function is modified from https://github.com/facebookresearch/audio2photoreal
     gt_static_list = []
     pred_static_list = []
@@ -238,29 +246,30 @@ def evaluation_a2p(joint_mask, gt_list, pred_list):
 
     # Load each sample
     for gt_info, pred_info in zip(gt_list, pred_list):
-        gt_dict = beat_format_load(gt_info["motion_path"], joint_mask)
-        pred_dict = beat_format_load(pred_info["motion_path"], joint_mask)
-
-        # Expected shape: (T, num_joints, 3)
+        gt_dict = beat_format_load(gt_info["motion_path_list"][0], joint_mask)
         gt_pose = gt_dict["poses"]
-        pred_pose = pred_dict["poses"]
-
-        # Flatten joints so each frame is a static pose vector
         gt_static = gt_pose.reshape(gt_pose.shape[0], -1)
-        pred_static = pred_pose.reshape(pred_pose.shape[0], -1)
-
         gt_static_list.append(gt_static)
-        pred_static_list.append(pred_static)
-
-        # Compute frame differences for kinematic analysis
         gt_diff = gt_static[1:] - gt_static[:-1]
-        pred_diff = pred_static[1:] - pred_static[:-1]
         gt_diff_list.append(gt_diff)
-        pred_diff_list.append(pred_diff)
 
-        # calculate temporal variance
-        var_k = np.var(pred_static, axis=0)
-        var_list.append(var_k)
+        pred_files = choose_item(pred_info["motion_path_list"], sampling_strategy)
+
+        for i, f in enumerate(pred_files):
+            pred_dict = beat_format_load(f, joint_mask)
+            pred_pose = pred_dict["poses"]
+
+            # Flatten joints so each frame is a static pose vector
+            pred_static = pred_pose.reshape(pred_pose.shape[0], -1)
+            pred_static_list.append(pred_static)
+
+            # Compute frame differences for kinematic analysis
+            pred_diff = pred_static[1:] - pred_static[:-1]
+            pred_diff_list.append(pred_diff)
+
+            # calculate temporal variance
+            var_k = np.var(pred_static, axis=0)
+            var_list.append(var_k)
 
     # Concatenate all frames from each sample
     pred_frames = np.concatenate(pred_static_list, axis=0)
@@ -373,6 +382,7 @@ if __name__ == '__main__':
     l1div_evaluator = L1div()
     srgr_evaluator = SRGR()
     table = LatexTableBuilder(columns=LATEX_COLUMNS)
+    sampling_strategy = 'all'  # (fixed, random, all); to choose a sample from multiple samples
 
     gt_list = make_list("./examples/BEAT2/")
     all_system_dir = "./examples/motion_generated/"
@@ -381,16 +391,17 @@ if __name__ == '__main__':
         if not isdir(system_path):
             continue
 
-        pred_list = make_list(system_path, is_generated=True, sample_strategy='fixed')
+        print(f"Evaluating {system}...")
+        pred_list = make_list(system_path, is_generated=True)
         if not compare_video_ids(gt_list, pred_list):
             exit()
         print(system, end=" ")
         # evaluation for fgd, bc, div
         metrics_emage = evaluation_emage([True] * 55, gt_list, pred_list, fgd_evaluator, bc_evaluator, l1div_evaluator,
-                                         srgr_evaluator, device)
+                                         srgr_evaluator, device, sampling_strategy)
 
         # evaluation for var_k, fd_g, fd_k
-        metrics_a2p = evaluation_a2p([True] * 55, gt_list, pred_list)
+        metrics_a2p = evaluation_a2p([True] * 55, gt_list, pred_list, sampling_strategy)
 
         # evaluation for sample diversity
         metric_sample_div = evaluation_sample_div(system_path)
