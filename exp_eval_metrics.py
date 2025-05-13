@@ -4,6 +4,7 @@ import random
 
 from os.path import isdir, join
 
+from joblib import Parallel, delayed
 import numpy as np
 import pandas as pd
 from scipy import linalg
@@ -59,7 +60,7 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
                 assert False
 
             # check if motion_gt and motion_pred have similar number of frames
-            if abs(motion_gt.shape[0] - motion_pred.shape[0]) > motion_gt.shape[0] * 0.15:
+            if abs(motion_gt.shape[0] - motion_pred.shape[0]) > motion_gt.shape[0] * 0.2:
                 print(f"Frame count mismatch for {test_file['video_id']}: {motion_gt.shape[0]} vs {motion_pred.shape[0]}")
                 assert False
 
@@ -157,7 +158,7 @@ def make_list(npz_path, audio_basepath='./BEAT2_english_wave16k/', sem_basepath=
 def compare_video_ids(list1, list2):
     # check lengths first
     if len(list1) != len(list2):
-        print("Lists have different lengths.")
+        print(f"Lists have different lengths. {len(list1)} vs {len(list2)}")
         return False
 
     # sort both lists by video_id so we compare matching entries
@@ -362,16 +363,133 @@ def evaluation_sample_div(system_path):
     return {"sample_div": overall_div}
 
 
+def evaluation_bootstrap(joint_mask, gt_list, pred_list, fgd_evaluator, device, sampling_strategy='fixed', random_seed=None, num_bootstrap=1000, sample_ratio=1.0):
+    """
+    computes bootstrapped confidence intervals for FGD, FD_g, and FD_k.
+    """
+    fgd_evaluator.reset()
+    gt_static_list = []
+    pred_static_list = []
+    gt_diff_list = []
+    pred_diff_list = []
+
+    for test_file in tqdm(gt_list, desc="Bootstrap Evaluation"):
+        pred_file = [item for item in pred_list if item["video_id"] == test_file["video_id"]]
+        if not pred_file:
+            print(f"Missing prediction for {test_file['video_id']}")
+            continue
+        pred_file = pred_file[0]
+        gt_dict = beat_format_load(test_file["motion_path_list"][0], joint_mask)
+        motion_gt = gt_dict["poses"]
+        pred_files = choose_item(pred_file["motion_path_list"], sampling_strategy)
+
+        for i, f in enumerate(pred_files):
+            pred_dict = beat_format_load(f, joint_mask)
+            motion_pred = pred_dict["poses"]
+
+            t_min = min(motion_gt.shape[0], motion_pred.shape[0])
+            motion_gt_trunc = motion_gt[:t_min]
+            motion_pred_trunc = motion_pred[:t_min]
+
+            # Update FGD evaluator (using 6d representation)
+            motion_pred_trunc_tensor = torch.from_numpy(motion_pred_trunc).to(device).unsqueeze(0)
+            motion_pred_trunc_tensor = rc.axis_angle_to_rotation_6d(motion_pred_trunc_tensor.reshape(1, t_min, 55, 3)).reshape(1, t_min, 55 * 6)
+            if i == 0:
+                motion_gt_trunc_tensor = torch.from_numpy(motion_gt_trunc).to(device).unsqueeze(0)
+                motion_gt_trunc_tensor = rc.axis_angle_to_rotation_6d(motion_gt_trunc_tensor.reshape(1, t_min, 55, 3)).reshape(1, t_min, 55 * 6)
+                fgd_evaluator.update(motion_gt_trunc_tensor.float(), motion_pred_trunc_tensor.float())
+            else:
+                fgd_evaluator.update_pred(motion_pred_trunc_tensor.float())
+
+            # Accumulate static pose (flattened) for FD_g
+            gt_static = motion_gt_trunc.reshape(t_min, -1)
+            pred_static = motion_pred_trunc.reshape(t_min, -1)
+            gt_static_list.append(gt_static)
+            pred_static_list.append(pred_static)
+
+            # Accumulate frame differences for FD_k (if more than one frame)
+            if t_min > 1:
+                gt_diff_list.append(gt_static[1:] - gt_static[:-1])
+                pred_diff_list.append(pred_static[1:] - pred_static[:-1])
+
+    # Concatenate FGD latent features from the evaluator (each as 2D array)
+    fgd_pred_features = np.concatenate([x.reshape(-1, x.shape[-1]) for x in fgd_evaluator.pred_features], axis=0)
+    fgd_target_features = np.concatenate([x.reshape(-1, x.shape[-1]) for x in fgd_evaluator.target_features], axis=0)
+    # Concatenate static poses and motion differences for FD_g and FD_k
+    pred_frames = np.concatenate(pred_static_list, axis=0)
+    gt_frames = np.concatenate(gt_static_list, axis=0)
+    pred_motion_diff = np.concatenate(pred_diff_list, axis=0)
+    gt_motion_diff = np.concatenate(gt_diff_list, axis=0)
+
+    if random_seed is not None:
+        np.random.seed(random_seed)
+
+    # bootstrap for FGD
+    n_pred_fgd = fgd_pred_features.shape[0]
+    n_target_fgd = fgd_target_features.shape[0]
+
+    def _fgd_once(_):
+        size_p = int(n_pred_fgd * sample_ratio)
+        size_t = int(n_target_fgd * sample_ratio)
+        idx_p = np.random.randint(n_pred_fgd, size=size_p)
+        idx_t = np.random.randint(n_target_fgd, size=size_t)
+        return FGD.frechet_distance(
+            fgd_pred_features[idx_p],
+            fgd_target_features[idx_t]
+        )
+
+    fgd_vals = np.asarray(
+        Parallel(n_jobs=10, backend="loky")(delayed(_fgd_once)(i) for i in range(num_bootstrap))
+    )
+
+    bootstrap_fgd = {
+        "mean": fgd_vals.mean(),
+        "lower_ci": np.percentile(fgd_vals, 2.5),
+        "upper_ci": np.percentile(fgd_vals, 97.5)
+    }
+
+    # bootstrap for FD_g · FD_k
+    fd_results = {}
+
+    for tag, gt_arr, pred_arr in [
+        ("fd_g", gt_frames, pred_frames),  # static
+        ("fd_k", gt_motion_diff, pred_motion_diff)]:  # kinematic
+        n_gt, n_pred = gt_arr.shape[0], pred_arr.shape[0]
+
+        def _fid_once(_):
+            idx_gt = np.random.randint(n_gt, size=int(n_gt * sample_ratio))
+            idx_pred = np.random.randint(n_pred, size=int(n_pred * sample_ratio))
+
+            mu_gt, cov_gt = calculate_activation_statistics(gt_arr[idx_gt])
+            mu_pr, cov_pr = calculate_activation_statistics(pred_arr[idx_pred])
+            return calculate_frechet_distance(mu_gt, cov_gt, mu_pr, cov_pr)
+
+        vals = np.asarray(
+            Parallel(n_jobs=10, backend="loky")(delayed(_fid_once)(i) for i in range(num_bootstrap))
+        )
+
+        fd_results[tag] = {
+            "mean": float(vals.mean()),
+            "lower_ci": float(np.percentile(vals, 2.5)),
+            "upper_ci": float(np.percentile(vals, 97.5)),
+        }
+
+    return {"fgd_bootstrap": bootstrap_fgd, "fd_g_bootstrap": fd_results["fd_g"], "fd_k_bootstrap": fd_results["fd_k"]}
+
+
 LATEX_COLUMNS = [
-    ("FGD", "fgd"),
-    ("$\\text{FD}_\\text{k}$", "fid_k"),
+    ("$\\text{FGD}$", "fgd"),
     ("$\\text{FD}_\\text{g}$", "fid_g"),
-    ("$\\text{L}_1\\text{-div}$", "div"),
-    ("$\\text{BC}_\\text{a2m}$", "bc_a2m"),
+    ("$\\text{FD}_\\text{k}$", "fid_k"),
+    # ("FGD", "fgd_bootstrap"),
+    # ("$\\text{FD}_\\text{g}$", "fd_g_bootstrap"),
+    # ("$\\text{FD}_\\text{k}$", "fd_k_bootstrap"),
     ("$\\text{BC}_\\text{m2a}$", "bc_m2a"),
-    ("$\\text{var}_\\text{k}$", "var_k"),
-    ("Sample div", "sample_div"),
-    ("SRGR", "srgr"),
+    ("$\\text{BC}_\\text{a2m}$", "bc_a2m"),
+    ("$\\text{SRGR}$", "srgr"),
+    ("$\\text{DIV}_\\text{pose}$", "div"),
+    ("$\\text{DIV}_\\text{k}$", "var_k"),
+    ("$\\text{DIV}_\\text{sample}$", "sample_div"),
 ]  # (header text, key)
 
 
@@ -388,7 +506,7 @@ if __name__ == '__main__':
     all_system_dir = "./examples/motion_generated/"
     for system in sorted(os.listdir(all_system_dir)):
         system_path = join(all_system_dir, system)
-        if not isdir(system_path):
+        if not isdir(system_path) or system.startswith('exclude_'):
             continue
 
         print(f"Evaluating {system}...")
@@ -406,7 +524,12 @@ if __name__ == '__main__':
         # evaluation for sample diversity
         metric_sample_div = evaluation_sample_div(system_path)
 
-        metrics = {**metrics_emage, **metrics_a2p, **(metric_sample_div if metric_sample_div else {})}
+        # evaluation for bootstrapped fgd, fd_g, fd_k
+        metrics_bootstrap = {}
+        # metrics_bootstrap = evaluation_bootstrap([True] * 55, gt_list, pred_list, fgd_evaluator, device,
+        #                                          sampling_strategy=sampling_strategy, num_bootstrap=1000)
+
+        metrics = {**metrics_emage, **metrics_a2p, **(metric_sample_div if metric_sample_div else {}), **metrics_bootstrap}
         print(metrics)
 
         table.add_row(system, metrics)

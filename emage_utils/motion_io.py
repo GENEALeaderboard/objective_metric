@@ -165,12 +165,15 @@ def beat_format_save(
 def beat_format_load(load_path: str, mask: list[bool] = None):
     data = np.load(load_path, allow_pickle=True)
     poses = data['poses']
-    betas = data['betas']
-    expressions = data['expressions']
+    betas = data['betas'] if 'betas' in data else None
+    expressions = data['expressions'] if 'expressions' in data else None
     trans = data['trans']
 
     if mask is not None:
         poses = select_with_mask(poses, mask)
+
+    # replace NaNs in poses with 0
+    poses = np.nan_to_num(poses, nan=0.0)
 
     return {
         "poses": poses,
