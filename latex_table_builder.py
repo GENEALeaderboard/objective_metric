@@ -32,10 +32,10 @@ class LatexTableBuilder:
 
     def render(self):
         # Header
-        header = " & ".join(["System"] + [col[0] for col in self.columns]) + " \\\\\n"
+        header = " & " + " & ".join(["System"] + [col[0] for col in self.columns]) + " \\\\\n"
         header += "\\\\\n\\midrule\n"
 
         # Rows
-        row_texts = [" & ".join(row) + " \\\\" for row in self.rows]
+        row_texts = [" & "  + " & ".join(row) + " \\\\" for row in self.rows]
 
         return header + "\n".join(row_texts) + "\n"

@@ -67,7 +67,7 @@ class SRGR(object):
             avg_weight = 1.0
         else:
             semantic = self.parse_semantic(semantic_raw_data, targets.shape[0])
-            avg_weight = 0.165  # srgr == 0.165 when all success, scale range to [0, 1]
+            avg_weight = 0.1672  # scale range to [0, 1] when all success
         results = results.reshape(-1, self.pose_dimes, self.joint_dim)
         targets = targets.reshape(-1, self.pose_dimes, self.joint_dim)
         semantic = semantic.reshape(-1)

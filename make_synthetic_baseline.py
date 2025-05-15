@@ -1,111 +1,61 @@
+from ast import Dict
 import os
+import random
 import numpy as np
 import glob
 import pandas as pd
 from os.path import join, basename, splitext
 from emage_utils.motion_io import beat_format_load
+from typing import List
 
 
-def noisy_baseline_human_mismatch(gt_dir, data_dir, split_csv, out_dir, num_samples=5):
-    """
-    Create synthetic data by mismatching poses from different files.
-    Generates multiple samples per ground truth file.
+def noisy_baseline_human_mismatch(
+    gt_dir: str,
+    out_dir: str,
+    num_samples: int = 5,
+    tol_ratio: float = 0.2
+):
+    paths: List[str] = sorted(glob.glob(join(gt_dir, "*.npz")))
+    N = len(paths)
 
-    Args:
-        gt_dir (str): Path to test set directory
-        data_dir (str): Path to full dataset directory
-        split_csv (str): Path to train/test split CSV file
-        out_dir (str): Path to output directory
-        num_samples (int): Number of synthetic samples to generate per GT file.
-    """
-    # Create output directory if it doesn't exist
+    length: Dict[str, int] = {
+        p: beat_format_load(p)["poses"].shape[0] for p in paths
+    }
+
+    base_order = sorted(paths, key=lambda p: (length[p], random.random()))
     os.makedirs(out_dir, exist_ok=True)
+    shifts = list(range(1, N))
 
-    # Load train/test split CSV
-    split_df = pd.read_csv(split_csv)
-    train_ids = split_df[split_df['type'] == 'train']['id'].tolist()
+    for k in range(1, num_samples + 1):
+        random.shuffle(shifts)
+        chosen_shift = None
+        for s in shifts:
+            targets = base_order[s:] + base_order[:s]
+            if all(
+                abs(length[src] - length[dst]) <= tol_ratio * length[src]
+                for src, dst in zip(base_order, targets)
+            ):
+                chosen_shift = s
+                break
+        if chosen_shift is None:
+            chosen_shift = min(
+                shifts,
+                key=lambda s: sum(
+                    abs(length[src] - length[dst])
+                    for src, dst in zip(base_order, base_order[s:] + base_order[:s])
+                )
+            )
 
-    # Get all training set files
-    train_files = []
-    for train_id in train_ids:
-        train_file = join(data_dir, f"{train_id}.npz")
-        if os.path.exists(train_file):
-            train_files.append(train_file)
+        targets = base_order[chosen_shift:] + base_order[:chosen_shift]
 
-    print(f"Found {len(train_files)} training files")
-
-    if len(train_files) < 1: # Need at least one training file
-        print("Not enough training files for mismatching")
-        return
-
-    # List all npz files in ground truth (test) directory
-    gt_files = glob.glob(join(gt_dir, "*.npz"))
-
-    if len(gt_files) < 1:
-        print("No test files found")
-        return
-
-    # Create mismatched data using test set structure but train set poses
-    for i, file_path in enumerate(gt_files):
-        # Load original test file data just once per GT file
-        try:
-            gt_data_template = beat_format_load(file_path)
-            original_length = gt_data_template["poses"].shape[0]
-        except Exception as e:
-            print(f"Error loading GT file {basename(file_path)}: {e}. Skipping.")
-            continue
-
-        # Find training files with sufficient length for this GT file
-        suitable_train_files = []
-        for train_file in train_files:
-            try:
-                # Quickly check shape without loading everything if possible
-                with np.load(train_file) as train_data_check:
-                    if "poses" in train_data_check and train_data_check["poses"].shape[0] >= original_length:
-                        suitable_train_files.append(train_file)
-            except Exception as e:
-                 print(f"Warning: Could not check/load train file {basename(train_file)}: {e}")
-                 continue
-
-
-        if not suitable_train_files:
-            print(f"Warning: No suitable training file found for {basename(file_path)} with length {original_length}")
-            continue
-
-        # Generate num_samples synthetic files
-        for j in range(num_samples):
-            # Select a random suitable training file (with replacement is okay)
-            selected_train_file = np.random.choice(suitable_train_files)
-
-            try:
-                # Load selected training file data
-                train_data = beat_format_load(selected_train_file)
-                train_poses_data = train_data["poses"]
-
-                # Create a copy of the GT data template for modification
-                data_to_save = gt_data_template.copy()
-
-                # Replace poses with training set poses (truncate if needed)
-                data_to_save["poses"] = train_poses_data[:original_length]
-
-                # Construct output filename with _sample_ suffix
-                base_filename, ext = splitext(basename(file_path))
-                out_filename = f"{base_filename}_sample_{j+1}{ext}"
-                out_path = join(out_dir, out_filename)
-
-                # Save to output file
-                np.savez(out_path, **data_to_save)
-                # Optional: print progress less frequently or summarize later
-                print(f"Created {out_filename} using poses from {basename(selected_train_file)}")
-
-            except Exception as e:
-                 print(f"Error processing sample {j+1} for {basename(file_path)} using {basename(selected_train_file)}: {e}")
-                 continue # Skip this sample if error occurs
-
-        print(f"Generated {num_samples} samples for {basename(file_path)}")
-
-
-    print(f"Finished creating mismatched files in {out_dir}")
+        for src_path, dst_path in zip(base_order, targets):
+            src_data = beat_format_load(src_path)
+            dst_data = beat_format_load(dst_path)
+            sample = src_data.copy()
+            sample["poses"] = dst_data["poses"].astype(src_data["poses"].dtype)
+            src_name = splitext(basename(src_path))[0]
+            out_name = f"{src_name}_sample_{k}.npz"
+            np.savez(join(out_dir, out_name), **sample)
 
 
 def noisy_baseline_gaussian_noise(gt_dir, out_dir, num_samples=5, noise_scale=0.02):
@@ -340,7 +290,7 @@ if __name__ == "__main__":
 
     # mismatch
     out_dir_mismatch = "./examples/motion_generated/human mismatch/"
-    noisy_baseline_human_mismatch(gt_dir, train_data_dir, split_csv, out_dir_mismatch, num_samples=num_samples_to_generate)
+    noisy_baseline_human_mismatch(gt_dir, out_dir_mismatch, num_samples=num_samples_to_generate)
 
     # gaussian noise
     out_dir_gaussian = "./examples/motion_generated/gaussian noise/"

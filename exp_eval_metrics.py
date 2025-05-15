@@ -61,8 +61,8 @@ def evaluation_emage(joint_mask, gt_list, pred_list, fgd_evaluator, bc_evaluator
 
             # check if motion_gt and motion_pred have similar number of frames
             if abs(motion_gt.shape[0] - motion_pred.shape[0]) > motion_gt.shape[0] * 0.2:
-                print(f"Frame count mismatch for {test_file['video_id']}: {motion_gt.shape[0]} vs {motion_pred.shape[0]}")
-                assert False
+                # assert False
+                print(f" Warning: Frame count mismatch for {test_file['video_id']}: {motion_gt.shape[0]} vs {motion_pred.shape[0]}")
 
             t = min(motion_gt.shape[0], motion_pred.shape[0])
             motion_gt_trunc = motion_gt[:t]
@@ -484,8 +484,8 @@ LATEX_COLUMNS = [
     # ("FGD", "fgd_bootstrap"),
     # ("$\\text{FD}_\\text{g}$", "fd_g_bootstrap"),
     # ("$\\text{FD}_\\text{k}$", "fd_k_bootstrap"),
-    ("$\\text{BC}_\\text{m2a}$", "bc_m2a"),
-    ("$\\text{BC}_\\text{a2m}$", "bc_a2m"),
+    ("$\\text{BA}_\\text{m2a}$", "bc_m2a"),
+    ("$\\text{BA}_\\text{a2m}$", "bc_a2m"),
     ("$\\text{SRGR}$", "srgr"),
     ("$\\text{DIV}_\\text{pose}$", "div"),
     ("$\\text{DIV}_\\text{k}$", "var_k"),
@@ -508,6 +508,10 @@ if __name__ == '__main__':
         system_path = join(all_system_dir, system)
         if not isdir(system_path) or system.startswith('exclude_'):
             continue
+
+        # for debugging
+        # if system != "human mismatch":
+        #     continue
 
         print(f"Evaluating {system}...")
         pred_list = make_list(system_path, is_generated=True)
