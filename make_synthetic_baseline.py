@@ -53,6 +53,7 @@ def noisy_baseline_human_mismatch(
             dst_data = beat_format_load(dst_path)
             sample = src_data.copy()
             sample["poses"] = dst_data["poses"].astype(src_data["poses"].dtype)
+            sample['trans'] = dst_data["trans"].astype(src_data["trans"].dtype)
             src_name = splitext(basename(src_path))[0]
             out_name = f"{src_name}_sample_{k}.npz"
             np.savez(join(out_dir, out_name), **sample)
@@ -160,7 +161,7 @@ def noisy_baseline_attenuated(gt_dir, out_dir, num_samples=5, attenuation_ratio=
     print(f"Finished creating attenuated baseline files in {out_dir}")
 
 
-def noisy_baseline_fluctuation(gt_dir, out_dir, num_samples=5, frequency=100, amplitude=0.05):
+def noisy_baseline_fluctuation(gt_dir, out_dir, num_samples=5, frequency=0.2, amplitude=0.05):
     """
     Creates synthetic data by adding rapid sinusoidal fluctuations
     to poses from ground truth files.
@@ -200,7 +201,7 @@ def noisy_baseline_fluctuation(gt_dir, out_dir, num_samples=5, frequency=100, am
                 phase = np.random.uniform(0, 2 * np.pi)
                 # Create a sinusoidal fluctuation: shape becomes (T, 1) for broadcasting.
                 t = np.arange(num_frames)
-                fluctuation = amplitude * np.sin(2 * np.pi * frequency * t / num_frames + phase)
+                fluctuation = amplitude * np.sin(2 * np.pi * frequency * t + phase)
                 fluctuation = fluctuation[:, np.newaxis]
                 # Add the fluctuation to the original poses.
                 fluctuated_poses = original_poses + fluctuation
